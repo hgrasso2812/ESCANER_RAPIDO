@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Scan FullScreen v13</title>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    <style>
+        body { 
+            margin: 0; padding: 0; background: #000; color: white; 
+            font-family: sans-serif; height: 100vh; overflow: hidden; 
+            display: flex; flex-direction: column;
+        }
+
+        /* EL VIDEO OCUPA TODO EL FONDO */
+        #contenedor-video {
+            position: relative; width: 100%; flex-grow: 1; overflow: hidden;
+        }
+        #reader { width: 100%; height: 100%; border: none; }
+        video { object-fit: cover; width: 100% !important; height: 100% !important; }
+
+        /* OVERLAY DE ESTADO (TEXTO ARRIBA) */
+        .barra-superior {
+            position: absolute; top: 0; left: 0; width: 100%;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+            padding: 20px; text-align: center; z-index: 10; font-size: 1.2rem;
+            pointer-events: none; text-shadow: 0 2px 4px black;
+        }
+
+        /* EL RECUADRO DE "CAPTURA" */
+        /* Cuando detecta, este borde se pone verde y grueso */
+        .borde-captura {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            box-sizing: border-box; border: 0px solid #00e676;
+            z-index: 5; pointer-events: none; transition: border-width 0.1s;
+        }
+        .borde-captura.activo { border-width: 10px; background: rgba(0, 230, 118, 0.1); }
+
+        /* PANEL INFERIOR QUE APARECE AL DETECTAR */
+        .panel-accion {
+            position: absolute; bottom: 0; left: 0; width: 100%;
+            background: rgba(10, 10, 10, 0.95);
+            border-top: 2px solid #333;
+            padding: 20px; box-sizing: border-box;
+            display: none; flex-direction: column; align-items: center; z-index: 20;
+            border-radius: 20px 20px 0 0;
+        }
+
+        .texto-detectado {
+            color: #00e676; font-size: 1.5rem; font-weight: bold; margin-bottom: 5px;
+            word-break: break-all; text-align: center;
+        }
+        .etiqueta-info { color: #aaa; font-size: 0.9rem; margin-bottom: 15px; }
+
+        /* BOTÓN FOTO GIGANTE */
+        .btn-foto {
+            width: 80px; height: 80px; border-radius: 50%; background: #ff4757;
+            border: 4px solid white; cursor: pointer; display: flex;
+            justify-content: center; align-items: center; font-size: 2rem;
+            box-shadow: 0 4px 15px rgba(255, 71, 87, 0.4);
+            animation: latido 1.5s infinite;
+        }
+        .btn-foto::after { content: '📸'; }
+
+        /* BOTÓN REINTENTAR */
+        .btn-retry {
+            background: none; border: none; color: #777; margin-top: 15px; 
+            text-decoration: underline; font-size: 1rem; cursor: pointer; padding: 10px;
+        }
+
+        @keyframes latido { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+        
+        /* CANVAS OCULTO PARA PROCESAR LA IMAGEN */
+        #canvas-final { display: none; }
+
+    </style>
+</head>
+<body>
+
+    <div id="contenedor-video">
+        <div class="barra-superior" id="txt-estado">Buscando códigos...</div>
+        <div id="borde-feedback" class="borde-captura"></div>
+        <div id="reader"></div>
+    </div>
+
+    <div id="panel-control" class="panel-accion">
+        <div class="etiqueta-info">CÓDIGO DETECTADO</div>
+        <div id="dato-leido" class="texto-detectado">...</div>
+        
+        <div style="display: flex; gap: 20px; align-items: center; margin-top: 10px;">
+            <button class="btn-retry" onclick="reiniciar()">Cancelar</button>
+            <button class="btn-foto" onclick="guardarFoto()"></button>
+        </div>
+    </div>
+
+    <canvas id="canvas-final"></canvas>
+
+    <script>
+        const html5QrCode = new Html5Qrcode("reader");
+        let escaneoActivo = true;
+        let nombreArchivo = "";
+        
+        // --- SONIDO BEEP ---
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function beep() {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const o = audioCtx.createOscillator(); const g = audioCtx.createGain();
+            o.connect(g); g.connect(audioCtx.destination);
+            o.type = "square"; o.frequency.value = 800; g.gain.value = 0.1;
+            o.start(); setTimeout(() => o.stop(), 100);
+        }
+
+        // --- INICIAR CÁMARA ---
+        window.onload = () => {
+            const config = { 
+                fps: 10, 
+                qrbox: { width: window.innerWidth * 0.9, height: window.innerHeight * 0.7 }, // Casi toda la pantalla
+                aspectRatio: window.innerHeight / window.innerWidth
+            };
+            
+            html5QrCode.start({ facingMode: "environment" }, config, onScanSuccess, onScanError)
+            .catch(err => { 
+                document.getElementById('txt-estado').innerText = "Error: Permiso de cámara denegado.";
+            });
+        };
+
+        function onScanError(error) {
+            // Ignoramos errores de "no code found" para que no llene la consola
+        }
+
+        // --- CUANDO ENCUENTRA EL CÓDIGO ---
+        function onScanSuccess(decodedText, decodedResult) {
+            if (!escaneoActivo) return;
+
+            // 1. Pausamos la lógica (pero el video sigue un momento para la foto)
+            escaneoActivo = false;
+            html5QrCode.pause(); 
+            beep();
+            if (navigator.vibrate) navigator.vibrate(100);
+
+            // 2. Limpiamos el nombre (Espacios a guiones)
+            nombreArchivo = decodedText.trim().replace(/ /g, "_").replace(/[^a-zA-Z0-9_\-]/g, "");
+
+            // 3. Efecto visual "Recuadro Verde"
+            const borde = document.getElementById('borde-feedback');
+            borde.classList.add('activo'); // Pone el borde verde grueso
+            
+            // 4. Mostramos el panel de abajo
+            document.getElementById('dato-leido').innerText = nombreArchivo;
+            document.getElementById('panel-control').style.display = 'flex';
+            document.getElementById('txt-estado').innerText = "¡CAPTURA LISTA!";
+            document.getElementById('txt-estado').style.color = "#00e676";
+        }
+
+        // --- GUARDAR FOTO ---
+        function guardarFoto() {
+            // Capturamos el frame actual del video
+            const videoElement = document.querySelector("#reader video");
+            const canvas = document.getElementById('canvas-final');
+            canvas.width = videoElement.videoWidth;
+            canvas.height = videoElement.videoHeight;
+            const ctx = canvas.getContext('2d');
+            
+            // Dibujamos la foto
+            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+
+            // Descargamos
+            const link = document.createElement('a');
+            link.download = nombreArchivo + ".jpg";
+            link.href = canvas.toDataURL("image/jpeg", 0.9);
+            link.click();
+
+            // Reiniciamos rápido
+            setTimeout(() => reiniciar(), 1000);
+        }
+
+        // --- REINICIAR ---
+        function reiniciar() {
+            escaneoActivo = true;
+            document.getElementById('borde-feedback').classList.remove('activo');
+            document.getElementById('panel-control').style.display = 'none';
+            document.getElementById('txt-estado').innerText = "Buscando códigos...";
+            document.getElementById('txt-estado').style.color = "white";
+            
+            try { html5QrCode.resume(); } catch(e) { console.log("Resuming..."); }
+        }
+
+    </script>
+</body>
+</html>
